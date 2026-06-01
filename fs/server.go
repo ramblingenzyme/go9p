@@ -175,6 +175,22 @@ func (s *server) Attach(gc go9p.Conn, t *proto.TAttach) (proto.FCall, error) {
 	return &proto.RAttach{proto.Header{proto.Rattach, t.Tag}, s.fs.Root.Stat().Qid}, nil
 }
 
+func (s *server) walkStep(file FSNode, name string) (FSNode, bool) {
+	dir, ok := file.(Dir)
+	if !ok {
+		return nil, false
+	}
+	next, ok := dir.Children()[name]
+	if modDir, mok := dir.(ModDir); !ok && mok && s.fs.WalkFail != nil {
+		if f, err := s.fs.WalkFail(s.fs, dir, name); err == nil && f != nil {
+			if modDir.AddChild(f) == nil {
+				return f, true
+			}
+		}
+	}
+	return next, ok
+}
+
 func (s *server) Walk(gc go9p.Conn, t *proto.TWalk) (proto.FCall, error) {
 	c := gc.(*conn)
 	i, ok := c.fids.Load(t.Fid)
@@ -202,22 +218,11 @@ func (s *server) Walk(gc go9p.Conn, t *proto.TWalk) (proto.FCall, error) {
 				file = parent
 			}
 		} else {
-			dir, ok := file.(Dir)
+			next, ok := s.walkStep(file, t.Wname[i])
 			if !ok {
 				break
 			}
-			file, ok = dir.Children()[t.Wname[i]]
-			if modDir, mok := dir.(ModDir); !ok && mok && s.fs.WalkFail != nil {
-				if f, err := s.fs.WalkFail(s.fs, dir, t.Wname[i]); err == nil && f != nil {
-					if modDir.AddChild(f) == nil {
-						file = f
-						ok = true
-					}
-				}
-			}
-			if !ok {
-				break
-			}
+			file = next
 		}
 		qids = append(qids, file.Stat().Qid)
 	}

@@ -181,10 +181,12 @@ func (s *server) walkStep(file FSNode, name string) (FSNode, bool) {
 		return nil, false
 	}
 	next, ok := dir.Children()[name]
-	if modDir, mok := dir.(ModDir); !ok && mok && s.fs.WalkFail != nil {
-		if f, err := s.fs.WalkFail(s.fs, dir, name); err == nil && f != nil {
-			if modDir.AddChild(f) == nil {
-				return f, true
+	if !ok && s.fs.WalkFail != nil {
+		if modDir, mok := dir.(ModDir); mok {
+			if f, err := s.fs.WalkFail(s.fs, dir, name); err == nil && f != nil {
+				if modDir.AddChild(f) == nil {
+					return f, true
+				}
 			}
 		}
 	}

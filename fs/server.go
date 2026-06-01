@@ -183,57 +183,59 @@ func (s *server) Walk(gc go9p.Conn, t *proto.TWalk) (proto.FCall, error) {
 	}
 	info := i.(*fidInfo)
 	file := info.n
-	if t.Nwname > 0 && t.Wname[0] == ".." {
-		parent := file.Parent()
-		if parent != nil {
-			c.fids.Store(t.Newfid, info.deriveInfo(parent))
-			qids := make([]proto.Qid, 1)
-			qids[0] = parent.Stat().Qid
-			return &proto.RWalk{proto.Header{proto.Rwalk, t.Tag}, 1, qids}, nil
-		} else {
-			return &proto.RWalk{proto.Header{proto.Rwalk, t.Tag}, 0, nil}, nil
-		}
+
+	if info.openMode != proto.None {
+		return &proto.RError{proto.Header{proto.Rerror, t.Tag}, "fid is open"}, nil
 	}
 
-	if t.Nwname > 0 && t.Wname[0] == "." {
-		c.fids.Store(t.Newfid, info.deriveInfo(file))
-		qids := make([]proto.Qid, 1)
-		qids[0] = file.Stat().Qid
-		return &proto.RWalk{proto.Header{proto.Rwalk, t.Tag}, 1, qids}, nil
+	if t.Newfid != t.Fid {
+		if _, inUse := c.fids.Load(t.Newfid); inUse {
+			return &proto.RError{proto.Header{proto.Rerror, t.Tag}, "newfid already in use"}, nil
+		}
 	}
 
 	qids := make([]proto.Qid, 0)
 	for i := 0; i < int(t.Nwname); i++ {
-		if dir, ok := file.(Dir); ok {
-			file, ok = dir.Children()[t.Wname[i]]
-			if !ok {
-				if s.fs.WalkFail == nil {
-					return &proto.RError{proto.Header{proto.Rerror, t.Tag}, "No such path"}, nil
-				}
-				f, err := s.fs.WalkFail(s.fs, dir, t.Wname[i])
-				if err != nil {
-					return &proto.RError{proto.Header{proto.Rerror, t.Tag}, err.Error()}, nil
-				}
-				if f == nil {
-					return &proto.RError{proto.Header{proto.Rerror, t.Tag}, "No such path"}, nil
-				}
-				modDir, ok := dir.(ModDir)
-				if !ok {
-					return &proto.RError{proto.Header{proto.Rerror, t.Tag}, fmt.Sprintf("%s does not support modification.", FullPath(dir))}, nil
-				}
-				err = modDir.AddChild(f)
-				if err != nil {
-					return &proto.RError{proto.Header{proto.Rerror, t.Tag}, err.Error()}, nil
-				}
-				file = f
+		if t.Wname[i] == ".." {
+			// ".." at root is a no-op per spec; otherwise go to parent.
+			if parent := file.Parent(); parent != nil {
+				file = parent
 			}
-			qids = append(qids, file.Stat().Qid)
 		} else {
-			return &proto.RError{proto.Header{proto.Rerror, t.Tag}, "No such path"}, nil
+			dir, ok := file.(Dir)
+			if !ok {
+				break
+			}
+			file, ok = dir.Children()[t.Wname[i]]
+			if modDir, mok := dir.(ModDir); !ok && mok && s.fs.WalkFail != nil {
+				if f, err := s.fs.WalkFail(s.fs, dir, t.Wname[i]); err == nil && f != nil {
+					if modDir.AddChild(f) == nil {
+						file = f
+						ok = true
+					}
+				}
+			}
+			if !ok {
+				break
+			}
+		}
+		qids = append(qids, file.Stat().Qid)
+	}
+
+	// 9P spec §13.10: first element failure → Rerror; later failure → partial Rwalk;
+	// newfid only updated on full success, which includes len(qids) and Nwame both equaling 0
+	qlen := len(qids)
+
+	switch {
+	case qlen == 0 && int(t.Nwname) > 0:
+		return &proto.RError{proto.Header{proto.Rerror, t.Tag}, "file does not exist"}, nil
+	case qlen == int(t.Nwname):
+		if t.Newfid != t.Fid {
+			c.fids.Store(t.Newfid, info.deriveInfo(file))
 		}
 	}
-	c.fids.Store(t.Newfid, info.deriveInfo(file))
-	return &proto.RWalk{proto.Header{proto.Rwalk, t.Tag}, uint16(len(qids)), qids}, nil
+
+	return &proto.RWalk{proto.Header{proto.Rwalk, t.Tag}, uint16(qlen), qids}, nil
 }
 
 func (s *server) Open(gc go9p.Conn, t *proto.TOpen) (proto.FCall, error) {
